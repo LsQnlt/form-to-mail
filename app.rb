@@ -41,15 +41,12 @@ class FormToMail < Sinatra::Base
   set :allowed_origins, ENV.fetch("ALLOWED_ORIGINS").split(",").map(&:strip).reject(&:empty?)
   set :mail_from, ENV.fetch("MAIL_FROM")
   set :mail_to, ENV.fetch("MAIL_TO")
-  set :smtp_url, ENV.fetch("SMTP_URL")
+  set :smtp, smtp_options(ENV.fetch("SMTP_URL"))
   set :hashcash_bits, Integer(ENV.fetch("HASHCASH_BITS", "18"), 10)
   set :rate_limit_hour, Integer(ENV.fetch("RATE_LIMIT_HOUR", "5"), 10)
   set :rate_limit_day, Integer(ENV.fetch("RATE_LIMIT_DAY", "100"), 10)
-  set :public_folder, File.expand_path("public", __dir__)
 
-  smtp = smtp_options(settings.smtp_url)
-  warn "form-to-mail smtp=#{smtp[:address]}:#{smtp[:port]} from=#{settings.mail_from} to=#{settings.mail_to}"
-  set :static, true
+  warn "form-to-mail smtp=#{settings.smtp[:address]}:#{settings.smtp[:port]} from=#{settings.mail_from} to=#{settings.mail_to}"
   set :logging, true
   set :show_exceptions, false
   set :raise_errors, false
@@ -182,7 +179,7 @@ class FormToMail < Sinatra::Base
   end
 
   def delivery_method
-    settings.test? ? [:test] : [:smtp, self.class.smtp_options(settings.smtp_url)]
+    settings.test? ? [:test] : [:smtp, settings.smtp]
   end
 
 
