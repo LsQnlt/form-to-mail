@@ -29,10 +29,16 @@ module Hashcash
     nil
   end
 
+  # A client can claim more bits than required, but only within a small margin:
+  # authentic? shifts by (256 - bits), so an unbounded bits turns into a giant
+  # left shift that allocates gigabytes for a single check.
+  BITS_MARGIN = 8
+
   def valid?(string, resource:, bits:, today: Date.today)
     stamp = parse(string)
     return false unless stamp
-    return false unless stamp.resource == resource && stamp.ext == "sha256" && stamp.bits >= bits
+    return false unless stamp.resource == resource && stamp.ext == "sha256"
+    return false unless stamp.bits.between?(bits, bits + BITS_MARGIN)
     return false unless stamp.date.between?(today - 1, today)
 
     authentic?(string, stamp.bits)

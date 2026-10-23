@@ -15,6 +15,11 @@ class HashcashTest < Minitest::Test
     refute Hashcash.valid?(stamp, resource: "example.org", bits: 12)
   end
 
+  def test_rejects_absurd_bits_without_allocating
+    stamp = "1:10000000000:#{Date.today.strftime('%y%m%d')}:example.org:sha256:abc:0"
+    refute Hashcash.valid?(stamp, resource: "example.org", bits: 8)
+  end
+
   def test_rejects_old_or_future_dates
     old = Hashcash.mint("example.org", bits: 8, date: Date.today - 2)
     future = Hashcash.mint("example.org", bits: 8, date: Date.today + 1)
