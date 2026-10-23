@@ -25,6 +25,19 @@ class FormToMail < Sinatra::Base
   FIELD_MAX_LENGTH = 200
   EMAIL_FORMAT = /\A[^@\s]+@[^@\s]+\.[^@\s]+\z/
 
+  def self.smtp_options(smtp_url)
+    url = URI(smtp_url)
+    {
+      address: url.host,
+      port: url.port,
+      user_name: URI.decode_www_form_component(url.user.to_s),
+      password: URI.decode_www_form_component(url.password.to_s),
+      authentication: :login,
+      tls: url.scheme == "smtps",
+      enable_starttls_auto: url.scheme != "smtps"
+    }
+  end
+
   set :allowed_origins, ENV.fetch("ALLOWED_ORIGINS").split(",").map(&:strip).reject(&:empty?)
   set :mail_from, ENV.fetch("MAIL_FROM")
   set :mail_to, ENV.fetch("MAIL_TO")
@@ -33,9 +46,13 @@ class FormToMail < Sinatra::Base
   set :rate_limit_hour, Integer(ENV.fetch("RATE_LIMIT_HOUR", "5"), 10)
   set :rate_limit_day, Integer(ENV.fetch("RATE_LIMIT_DAY", "100"), 10)
   set :public_folder, File.expand_path("public", __dir__)
+
+  smtp = smtp_options(settings.smtp_url)
+  warn "form-to-mail smtp=#{smtp[:address]}:#{smtp[:port]} from=#{settings.mail_from} to=#{settings.mail_to}"
   set :static, true
   set :logging, true
   set :show_exceptions, false
+  set :raise_errors, false
   set :dump_errors, false
 
   # In-memory state: spent stamps and send timestamps. Lost on restart, which
@@ -55,63 +72,74 @@ class FormToMail < Sinatra::Base
     end
   end
 
+  # Any failure a visitor can see sends them back to the site with sent=0.
+  error do
+    e = env["sinatra.error"]
+    logger.error("form-to-mail ip=#{request.ip} error=#{e.class}: #{e.message.lines.first.to_s.strip}")
+    halt 500, "sending failed" unless settings.allowed_origins.include?(origin)
+    redirect back_url(sent: false), 303
+  end
+
   get "/" do
     content_type :text
     "ok"
   end
 
   post "/send" do
-    origin = request.env["HTTP_ORIGIN"].to_s
     unless settings.allowed_origins.include?(origin)
-      log_result(origin, "forbidden origin")
+      log_result("forbidden origin")
       halt 403, "forbidden origin"
     end
 
-    redirect_to = origin + redirect_path
-
     # Honeypot filled: a bot. Pretend everything went well.
     unless params["website"].to_s.empty?
-      log_result(origin, "honeypot")
-      redirect redirect_to, 303
+      log_result("honeypot")
+      redirect back_url(sent: true), 303
     end
 
     name = params["name"].to_s.strip
     email = params["email"].to_s.strip
     message = params["message"].to_s.strip
-    halt 422, "missing fields" if name.empty? || email.empty? || message.empty?
-    halt 422, "invalid email" unless email.match?(EMAIL_FORMAT) && email.length <= FIELD_MAX_LENGTH
-    halt 422, "message too long" if name.length > FIELD_MAX_LENGTH || message.length > MESSAGE_MAX_LENGTH
+    fail_back("missing fields") if name.empty? || email.empty? || message.empty?
+    fail_back("invalid email") unless email.match?(EMAIL_FORMAT) && email.length <= FIELD_MAX_LENGTH
+    fail_back("too long") if name.length > FIELD_MAX_LENGTH || message.length > MESSAGE_MAX_LENGTH
 
     stamp = params["hashcash"].to_s
     unless Hashcash.valid?(stamp, resource: URI(origin).host, bits: settings.hashcash_bits) && spend(stamp)
-      log_result(origin, "invalid hashcash")
-      halt 422, "invalid proof of work, please reload the page and try again"
+      fail_back("invalid hashcash")
     end
 
-    unless within_limits?(request.ip)
-      log_result(origin, "rate limited")
-      halt 429, "too many messages, please try again later"
-    end
+    fail_back("rate limited") unless within_limits?(request.ip)
 
-    deliver(origin, name, email, message)
-    log_result(origin, "sent")
-    redirect redirect_to, 303
+    deliver(name, email, message)
+    log_result("sent")
+    redirect back_url(sent: true), 303
   end
 
   private
 
-  # Path on the site to go back to, with sent=1 added before any fragment.
-  def redirect_path
+  def origin
+    request.env["HTTP_ORIGIN"].to_s
+  end
+
+  # URL on the site to go back to: _redirect path with sent=1 or sent=0 added
+  # before any fragment.
+  def back_url(sent:)
     path = params["_redirect"].to_s
     path = "/" unless path.start_with?("/") && !path.start_with?("//")
     path, fragment = path.split("#", 2)
-    path += path.include?("?") ? "&sent=1" : "?sent=1"
-    fragment ? "#{path}##{fragment}" : path
+    path += (path.include?("?") ? "&" : "?") + "sent=#{sent ? 1 : 0}"
+    origin + (fragment ? "#{path}##{fragment}" : path)
+  end
+
+  def fail_back(reason)
+    log_result(reason)
+    redirect back_url(sent: false), 303
   end
 
   def spend(stamp)
-    self.class.state_lock.synchronize do
-      spent = self.class.spent_stamps
+    FormToMail.state_lock.synchronize do
+      spent = FormToMail.spent_stamps
       spent.delete_if { |_, seen_at| seen_at < Time.now - 2 * 86_400 }
       return false if spent.key?(stamp)
 
@@ -122,8 +150,8 @@ class FormToMail < Sinatra::Base
 
   def within_limits?(ip)
     now = Time.now
-    self.class.state_lock.synchronize do
-      sent = self.class.sent_at
+    FormToMail.state_lock.synchronize do
+      sent = FormToMail.sent_at
       sent.delete_if { |_, at| at < now - 86_400 }
       return false if sent.size >= settings.rate_limit_day
       return false if sent.count { |sender, at| sender == ip && at >= now - 3600 } >= settings.rate_limit_hour
@@ -133,7 +161,7 @@ class FormToMail < Sinatra::Base
     end
   end
 
-  def deliver(origin, name, email, message)
+  def deliver(name, email, message)
     site = URI(origin).host
     mail = Mail.new
     mail.from = settings.mail_from
@@ -157,20 +185,8 @@ class FormToMail < Sinatra::Base
     settings.test? ? [:test] : [:smtp, self.class.smtp_options(settings.smtp_url)]
   end
 
-  def self.smtp_options(smtp_url)
-    url = URI(smtp_url)
-    {
-      address: url.host,
-      port: url.port,
-      user_name: URI.decode_www_form_component(url.user.to_s),
-      password: URI.decode_www_form_component(url.password.to_s),
-      authentication: :login,
-      tls: url.scheme == "smtps",
-      enable_starttls_auto: url.scheme != "smtps"
-    }
-  end
 
-  def log_result(origin, result)
+  def log_result(result)
     logger.info("form-to-mail ip=#{request.ip} origin=#{origin} result=#{result}")
   end
 end

@@ -56,9 +56,9 @@ Le service ne stocke rien : les stamps vus et les compteurs sont en mémoire et 
 
    `resource` doit être l'hôte de la page et `bits` au moins `HASHCASH_BITS`. Le bouton est désactivé le temps du calcul, puis reprend son texte.
 
-3. Après envoi, le visiteur est renvoyé sur `_redirect` du même site, avec `?sent=1` ajouté. La page affiche la confirmation qu'elle veut.
+3. Après envoi, le visiteur est renvoyé sur `_redirect` du même site, avec `?sent=1` ajouté. En cas d'échec (champ manquant, email invalide, preuve de travail absente, fausse ou déjà utilisée, limite atteinte, SMTP en panne), il est renvoyé au même endroit avec `?sent=0`. La page affiche le message qu'elle veut dans les deux cas ; la raison exacte est dans les logs du service, jamais montrée au visiteur.
 
-Réponses d'erreur : `403` origine inconnue, `422` champ manquant, email invalide ou preuve de travail absente, fausse ou déjà utilisée, `429` limite atteinte. Les navigateurs envoient toujours l'en-tête `Origin` sur un POST de formulaire vers un autre domaine, c'est sur lui que repose le contrôle d'origine.
+Seule une origine absente de `ALLOWED_ORIGINS` reçoit une réponse brute `403`. Les navigateurs envoient toujours l'en-tête `Origin` sur un POST de formulaire vers un autre domaine, c'est sur lui que repose le contrôle d'origine.
 
 ## Développement
 

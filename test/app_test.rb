@@ -11,6 +11,7 @@ ENV["RATE_LIMIT_DAY"] = "3"
 
 require "minitest/autorun"
 require "rack/test"
+require "net/smtp"
 require_relative "../app"
 
 class FormToMailTest < Minitest::Test
@@ -18,8 +19,14 @@ class FormToMailTest < Minitest::Test
 
   ORIGIN = "https://example.org"
 
+  class FailingDelivery < FormToMail
+    def deliver(*)
+      raise Net::SMTPAuthenticationError, "535 Authentication failed"
+    end
+  end
+
   def app
-    FormToMail
+    @app || FormToMail
   end
 
   def setup
@@ -77,38 +84,48 @@ class FormToMailTest < Minitest::Test
 
   def test_rejects_missing_fields_and_bad_email
     submit(fields.merge("message" => ""))
-    assert_equal 422, last_response.status
+    assert_sent_back_with_failure
 
     submit(fields.merge("email" => "not an email"))
-    assert_equal 422, last_response.status
+    assert_sent_back_with_failure
     assert_empty Mail::TestMailer.deliveries
   end
 
   def test_rejects_missing_wrong_or_reused_stamps
     submit(fields.merge("hashcash" => ""))
-    assert_equal 422, last_response.status
+    assert_sent_back_with_failure
 
     submit(fields.merge("hashcash" => Hashcash.mint("other.org", bits: 8)))
-    assert_equal 422, last_response.status
+    assert_sent_back_with_failure
 
     stamp = Hashcash.mint("example.org", bits: 8)
     submit(fields.merge("hashcash" => stamp))
-    assert_equal 303, last_response.status
+    assert_equal "https://example.org/?sent=1", last_response.headers["Location"]
     submit(fields.merge("hashcash" => stamp))
-    assert_equal 422, last_response.status
+    assert_sent_back_with_failure
     assert_equal 1, Mail::TestMailer.deliveries.size
   end
 
   def test_limits_messages_per_ip_and_per_day
     2.times { submit(fields) }
     submit(fields)
-    assert_equal 429, last_response.status
+    assert_sent_back_with_failure
 
     submit(fields, ip: "10.0.0.2")
-    assert_equal 303, last_response.status
+    assert_equal "https://example.org/?sent=1", last_response.headers["Location"]
     submit(fields, ip: "10.0.0.3")
-    assert_equal 429, last_response.status, "daily limit reached"
+    assert_sent_back_with_failure
     assert_equal 3, Mail::TestMailer.deliveries.size
+  end
+
+  def test_delivery_failure_sends_the_visitor_back_with_sent_0
+    @app = FailingDelivery
+    submit(fields.merge("_redirect" => "/#contact"))
+    assert_equal 303, last_response.status
+    assert_equal "https://example.org/?sent=0#contact", last_response.headers["Location"]
+
+    submit(fields, origin: "https://evil.example")
+    assert_equal 403, last_response.status
   end
 
   def test_smtp_settings_come_from_the_url
@@ -122,6 +139,11 @@ class FormToMailTest < Minitest::Test
   end
 
   private
+
+  def assert_sent_back_with_failure
+    assert_equal 303, last_response.status
+    assert_equal "https://example.org/?sent=0", last_response.headers["Location"]
+  end
 
   def fields
     {
