@@ -8,6 +8,6 @@ gem "rackup", "~> 2.1"
 gem "sinatra", "~> 4.1"
 
 group :test do
-  gem "minitest", "~> 5.25"
+  gem "minitest", "~> 6.0"
   gem "rack-test", "~> 2.1"
 end
