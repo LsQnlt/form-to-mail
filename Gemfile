@@ -1,6 +1,6 @@
 source "https://rubygems.org"
 
-ruby "~> 3.2"
+ruby "~> 4.0"
 
 gem "mail", "~> 2.8"
 gem "puma", "~> 8.0"
